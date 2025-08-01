@@ -1771,11 +1771,23 @@ static void common_chat_parse_hermes_2_pro(common_chat_msg_parser & builder)
             {
                 std::string key   = (*it)[1].str();
                 std::string value = (*it)[2].str();
-
+                
+                /* trim leading / trailing white-space */
                 value = std::regex_replace(value, std::regex(R"_(^\s+|\s+$)_"), "");
-                value = std::regex_replace(value, std::regex(R"_(^"(.*)"$)_"), "$1");
-
-                arguments[key] = value;      // keep as string
+                
+                /* If the parameter is a JSON string literal ("…"), decode it so that
+                   escape sequences such as \n, \t, \" are turned into real characters. */
+                if (!value.empty() && value.front() == '"' && value.back() == '"') {
+                    try {
+                        /* nlohmann::json is already in use elsewhere, so just reuse it */
+                        value = json::parse(value).get<std::string>();
+                    } catch (...) {
+                        /* Fallback: strip the surrounding quotes but leave escapes verbatim */
+                        value = value.substr(1, value.size() - 2);
+                    }
+                }
+                
+                arguments[key] = value; // contains decoded string
             }
 
             // Text before the tool call
