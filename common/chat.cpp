@@ -1680,6 +1680,8 @@ static common_chat_params common_chat_params_init_hermes_2_pro(const common_chat
                 "</function>",
                 "<tools>",
                 "</tools>",
+                "<description>",
+                "</description>",                
                 "<response>",
                 "</response>",
                 "<function_call>",
