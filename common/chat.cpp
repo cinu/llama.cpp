@@ -1524,17 +1524,84 @@ static common_chat_params common_chat_params_init_hermes_2_pro(const common_chat
     }
 
     if (!inputs.tools.is_null()) {
-        // (content)?(<tool_call>{"name": "foo", "arguments": {"a": 1}}</tool_call>)*
         data.grammar_lazy = inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_REQUIRED;
         data.grammar = build_grammar([&](const common_grammar_builder & builder) {
             std::vector<std::string> tool_rules;
             std::vector<std::string> tool_call_alts;
             std::vector<std::string> escaped_names;
+            
             foreach_function(inputs.tools, [&](const json & tool) {
                 const auto & function = tool.at("function");
                 std::string name = function.at("name");
                 auto parameters = function.at("parameters");
                 builder.resolve_refs(parameters);
+                
+                // Build parameter rules for Qwen XML format
+                std::vector<std::string> param_rules;
+                if (parameters.contains("properties") && parameters["properties"].is_object()) {
+                    for (const auto & [param_name, param_schema] : parameters["properties"].items()) {
+                        // Create rule for this parameter: <parameter=name>value</parameter>
+                        std::string param_rule = "\"<parameter=" + param_name + ">\" space ";
+                        param_rule += builder.add_schema(name + "-" + param_name + "-value", param_schema);
+                        param_rule += " \"</parameter>\" space";
+                        param_rules.push_back(param_rule);
+                    }
+                }
+                
+                // Build the complete function rule for Qwen format
+                std::string function_content = "";
+                if (!param_rules.empty()) {
+                    // For required parameters, make them mandatory
+                    if (parameters.contains("required") && parameters["required"].is_array()) {
+                        std::vector<std::string> required_params;
+                        std::vector<std::string> optional_params;
+                        
+                        for (size_t i = 0; i < param_rules.size(); i++) {
+                            std::string param_name = parameters["properties"].begin().key(); // This is simplified
+                            auto it = parameters["properties"].begin();
+                            std::advance(it, i);
+                            param_name = it.key();
+                            
+                            bool is_required = false;
+                            for (const auto & req : parameters["required"]) {
+                                if (req.is_string() && req.get<std::string>() == param_name) {
+                                    is_required = true;
+                                    break;
+                                }
+                            }
+                            
+                            if (is_required) {
+                                required_params.push_back(param_rules[i]);
+                            } else {
+                                optional_params.push_back("( " + param_rules[i] + " )?");
+                            }
+                        }
+                        
+                        // Combine required and optional parameters
+                        std::vector<std::string> all_params = required_params;
+                        all_params.insert(all_params.end(), optional_params.begin(), optional_params.end());
+                        function_content = string_join(all_params, " ");
+                    } else {
+                        // All parameters are optional
+                        std::vector<std::string> optional_params;
+                        for (const auto & param_rule : param_rules) {
+                            optional_params.push_back("( " + param_rule + " )?");
+                        }
+                        function_content = string_join(optional_params, " ");
+                    }
+                }
+                
+                // Create the complete tool call rule in Qwen format
+                std::string qwen_function_rule = 
+                    "\"<tool_call>\" space "
+                    "\"<function=" + name + ">\" space " +
+                    function_content + " "
+                    "\"</function>\" space "
+                    "\"</tool_call>\" space";
+                
+                tool_call_alts.push_back(builder.add_rule(name + "-qwen-call", qwen_function_rule));
+                
+                // Also support the original JSON format for backward compatibility
                 tool_rules.push_back(builder.add_schema(name + "-call", {
                     {"type", "object"},
                     {"properties", json {
@@ -1543,12 +1610,18 @@ static common_chat_params common_chat_params_init_hermes_2_pro(const common_chat
                     }},
                     {"required", json::array({"name", "arguments"})},
                 }));
+                
                 tool_call_alts.push_back(builder.add_rule(
                     name + "-function-tag",
                     "\"<function\" ( \"=" + name + "\" | \" name=\\\"" + name + "\\\"\" ) \">\" space " +
                     builder.add_schema(name + "-args", parameters) + " "
                     "\"</function>\" space"));
 
+                // Add grammar triggers for both formats
+                data.grammar_triggers.push_back({
+                    COMMON_GRAMMAR_TRIGGER_TYPE_WORD,
+                    "<tool_call>",
+                });
                 data.grammar_triggers.push_back({
                     COMMON_GRAMMAR_TRIGGER_TYPE_WORD,
                     "<function=" + name + ">",
@@ -1560,6 +1633,7 @@ static common_chat_params common_chat_params_init_hermes_2_pro(const common_chat
                 });
                 escaped_names.push_back(escaped_name);
             });
+            
             auto any_tool_call = builder.add_rule("any_tool_call", "( " + string_join(tool_rules, " | ") + " ) space");
             std::vector<std::string> alt_tags {
                 any_tool_call,
@@ -1580,11 +1654,10 @@ static common_chat_params common_chat_params_init_hermes_2_pro(const common_chat
             builder.add_rule("root",
                 std::string(data.thinking_forced_open ? "( \"</think>\" space )? " : "") +
                 (inputs.parallel_tool_calls ? "(" + tool_call + ")+" : tool_call));
-            // Trigger on some common known "good bad" outputs (only from the start and with a json that's about a specific argument name to avoid false positives)
+            
+            // Update triggers to include Qwen format
             data.grammar_triggers.push_back({
                 COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN_FULL,
-                // If thinking_forced_open, then we capture the </think> tag in the grammar,
-                // (important for required tool choice) and in the trigger's first capture (decides what is sent to the grammar)
                 std::string(data.thinking_forced_open ? "[\\s\\S]*?(</think>\\s*)" : "(?:<think>[\\s\\S]*?</think>\\s*)?") + (
                     "(\\s*"
                     "(?:<tool_call>"
@@ -1595,12 +1668,16 @@ static common_chat_params common_chat_params_init_hermes_2_pro(const common_chat
                     ")[\\s\\S]*"
                 ),
             });
+            
             data.preserved_tokens = {
                 "<think>",
                 "</think>",
                 "<tool_call>",
                 "</tool_call>",
                 "<function",
+                "<parameter",
+                "</parameter>",
+                "</function>",
                 "<tools>",
                 "</tools>",
                 "<response>",
@@ -1620,83 +1697,131 @@ static common_chat_params common_chat_params_init_hermes_2_pro(const common_chat
 
     return data;
 }
-static void common_chat_parse_hermes_2_pro(common_chat_msg_parser & builder) {
+
+static void common_chat_parse_hermes_2_pro(common_chat_msg_parser & builder)
+{
+    // 0. optional <think>...</think>
     builder.try_parse_reasoning("<think>", "</think>");
+
     if (!builder.syntax().parse_tool_calls) {
         builder.add_content(builder.consume_rest());
         return;
     }
 
-    static const common_regex open_regex(
-        "(?:"
-            "(```(?:xml|json)?\\n\\s*)?" // match 1 (block_start)
-            "("                          // match 2 (open_tag)
-                "<tool_call>"
-                "|<function_call>"
-                "|<tool>"
-                "|<tools>"
-                "|<response>"
-                "|<json>"
-                "|<xml>"
-                "|<JSON>"
-            ")?"
-            "(\\s*\\{\\s*\"name\")" // match 3 (named tool call)
-        ")"
-        "|<function=([^>]+)>"            // match 4 (function name)
-        "|<function name=\"([^\"]+)\">"  // match 5 (function name again)
-    );
+    //  1. Generic JSON wrapper  { "tool_call": ... } | { "tool_calls": ... } 
+    //  (only attempt when we have the **final** chunk)
+    if (!builder.is_partial() &&
+        builder.pos() < builder.input().size() &&
+        builder.input()[builder.pos()] == '{')
+    {
+        static const std::vector<std::vector<std::string>> args_paths = {
+            {"tool_call",  "arguments"},
+            {"tool_calls", "arguments"},
+        };
+        static const std::vector<std::vector<std::string>> content_paths = {
+            {"content"},
+        };
 
-    if (auto res = builder.try_find_regex(open_regex)) {
-        const auto & block_start = res->groups[1];
-        std::string block_end = block_start.empty() ? "" : "```";
+        auto data = builder.consume_json_with_dumped_args(args_paths, content_paths);
 
-        const auto & open_tag = res->groups[2];
-        std::string close_tag;
-
-        if (!res->groups[3].empty()) {
-            builder.move_to(res->groups[3].begin);
-            close_tag = open_tag.empty() ? "" : "</" + builder.str(open_tag).substr(1);
-
-            if (auto tool_call = builder.try_consume_json_with_dumped_args({{"arguments"}})) {
-                if (!builder.add_tool_call(tool_call->value) || tool_call->is_partial) {
-                    throw common_chat_msg_partial_exception("incomplete tool call");
-                }
-                builder.consume_spaces();
-                builder.consume_literal(close_tag);
-                builder.consume_spaces();
-                if (!block_end.empty()) {
-                    builder.consume_literal(block_end);
-                    builder.consume_spaces();
-                }
-                builder.add_content(builder.consume_rest());
-            } else {
-                throw common_chat_msg_partial_exception("failed to parse tool call");
-            }
-        } else {
-            auto function_name = builder.str(res->groups[4]);
-            if (function_name.empty()) {
-                function_name = builder.str(res->groups[5]);
-            }
-            GGML_ASSERT(!function_name.empty());
-
-            close_tag = "</function>";
-
-            if (auto arguments = builder.try_consume_json_with_dumped_args({{}})) {
-                if (!builder.add_tool_call(function_name, "", arguments->value) || arguments->is_partial) {
-                    throw common_chat_msg_partial_exception("incomplete tool call");
-                }
-                builder.consume_spaces();
-                builder.consume_literal(close_tag);
-                builder.consume_spaces();
-                if (!block_end.empty()) {
-                    builder.consume_literal(block_end);
-                    builder.consume_spaces();
-                }
-            }
-            builder.add_content(builder.consume_rest());
+        if (data.value.contains("tool_calls")) {
+            if (!builder.add_tool_calls(data.value.at("tool_calls")))
+                throw common_chat_msg_partial_exception("failed tool_calls");
+        } else if (data.value.contains("tool_call")) {
+            if (!builder.add_tool_call(data.value.at("tool_call")))
+                throw common_chat_msg_partial_exception("failed tool_call");
         }
-    } else {
-        builder.add_content(builder.consume_rest());
+
+        if (data.value.contains("content")) {
+            const auto & cnt = data.value.at("content");
+            builder.add_content(cnt.is_string() ? cnt.get<std::string>()
+                                                : cnt.dump(2));
+        }
+        return;
+    }
+
+    
+    //  2. Qwen3-coder-style XML wrapper
+    //     <tool_call><function=NAME> ... </function></tool_call>
+    //     (also only when final chunk — avoids dangling fragments
+    //      leaking into content)
+
+    if (!builder.is_partial()) {
+        std::string full_text = builder.consume_rest();
+
+        std::regex qwen_regex(
+            R"_(<tool_call>\s*<function=([^>]+)>([\s\S]*?)</function>\s*</tool_call>)_",
+            std::regex::optimize);
+        std::smatch qwen_match;
+
+        if (std::regex_search(full_text, qwen_match, qwen_regex)) {
+            std::string function_name  = qwen_match[1].str();
+            std::string params_content = qwen_match[2].str();
+
+            // Extract <parameter=key>value</parameter>
+            json arguments = json::object();
+            std::regex param_regex(
+                R"_(<parameter=([^>]+)>([\s\S]*?)</parameter>)_",
+                std::regex::optimize);
+
+            for (std::sregex_iterator it(params_content.begin(), params_content.end(), param_regex),
+                                      last; it != last; ++it)
+            {
+                std::string key   = (*it)[1].str();
+                std::string value = (*it)[2].str();
+
+                value = std::regex_replace(value, std::regex(R"_(^\s+|\s+$)_"), "");
+                value = std::regex_replace(value, std::regex(R"_(^"(.*)"$)_"), "$1");
+
+                arguments[key] = value;      // keep as string
+            }
+
+            // Text before the tool call
+            if (size_t pos = qwen_match.position(); pos > 0) {
+                std::string before = full_text.substr(0, pos);
+                before = std::regex_replace(before, std::regex(R"_(\s+$)_"), "");
+                if (!before.empty()) builder.add_content(before);
+            }
+
+            // The tool call itself
+            if (!builder.add_tool_call(function_name, "", arguments.dump()))
+                throw common_chat_msg_partial_exception("add_tool_call failed");
+
+            // Text after the tool call
+            size_t end = qwen_match.position() + qwen_match.length();
+            if (end < full_text.size()) {
+                std::string after = full_text.substr(end);
+                after = std::regex_replace(after, std::regex(R"_(^\s+)_"), "");
+                if (!after.empty()) builder.add_content(after);
+            }
+            return; 
+        }
+
+        // No tool-call structure detected → plain content
+        builder.add_content(full_text);
+        return;
+    }
+
+    /* 3. PARTIAL-STREAM branch */
+    {
+        std::string rest = builder.consume_rest();
+
+        // If the partial chunk begins or contains the *start* of a wrapper
+        // we simply don’t emit it yet – we’ll handle it in a later chunk.
+        size_t tc_pos = rest.find("<tool_call");
+        size_t json_pos = rest.find('{');
+
+        // keep only the text *before* an opening wrapper (if any)
+        size_t cut = std::min(
+            tc_pos == std::string::npos ? rest.size() : tc_pos,
+            json_pos == std::string::npos ? rest.size() : json_pos);
+
+        if (cut > 0)
+            builder.add_content(rest.substr(0, cut));
+
+        // anything after `cut` is either start-of-wrapper or empty; we
+        // deliberately ignore it until the wrapper is complete.
+        return;
     }
 }
 
