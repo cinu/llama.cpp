@@ -267,6 +267,10 @@ nlohmann::ordered_json common_chat_msg_diff_to_json_oaicompat(const common_chat_
 // get template caps, useful for reporting to server /props endpoint
 std::map<std::string, bool> common_chat_templates_get_caps(const common_chat_templates * chat_templates);
 
+// Discover special tokens used by this template via auto-parser differential analysis.
+// Returns a vector of token strings (e.g. "<|tool_call_begin|>", "<think>", etc.)
+std::vector<std::string> common_chat_templates_get_preserved_tokens(const common_chat_templates * chat_templates);
+
 std::string common_chat_template_direct_apply(
     const common_chat_template & tmpl,
     const autoparser::generation_params & inputs);

@@ -1961,3 +1961,16 @@ std::map<std::string, bool> common_chat_templates_get_caps(const common_chat_tem
     return chat_templates->template_default->caps.to_map();
 }
 
+std::vector<std::string> common_chat_templates_get_preserved_tokens(const common_chat_templates * chat_templates) {
+    GGML_ASSERT(chat_templates != nullptr);
+    GGML_ASSERT(chat_templates->template_default != nullptr);
+    try {
+        struct autoparser::autoparser ap;
+        ap.analyze_template(*chat_templates->template_default);
+        return ap.preserved_tokens;
+    } catch (const std::exception & e) {
+        LOG_WRN("Failed to discover preserved tokens via auto-parser: %s\n", e.what());
+        return {};
+    }
+}
+

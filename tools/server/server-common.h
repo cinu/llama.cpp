@@ -291,6 +291,8 @@ struct server_chat_params {
     std::string reasoning_budget_message;
     std::string media_path;
     bool force_pure_content = false;
+    bool strip_special_tokens = false;
+    std::vector<std::string> special_tokens; // auto-parser discovered tokens to strip
 };
 
 // used by /completions endpoint

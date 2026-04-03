@@ -912,8 +912,46 @@ private:
                 /* reasoning_budget      */ params_base.reasoning_budget,
                 /* reasoning_budget_msg  */ params_base.reasoning_budget_message,
                 /* media_path            */ params_base.media_path,
-                /* force_pure_content    */ params_base.force_pure_content_parser
+                /* force_pure_content    */ params_base.force_pure_content_parser,
+                /* strip_special_tokens  */ params_base.strip_special_tokens,
+                /* special_tokens        */ {},
             };
+
+            if (chat_params.strip_special_tokens && chat_params.tmpls) {
+                // Minimum token length to avoid stripping common characters like ">"
+                static constexpr size_t MIN_TOKEN_LEN = 3;
+
+                // Collect template-specific structural tokens from auto-parser
+                auto autoparser_tokens = common_chat_templates_get_preserved_tokens(chat_params.tmpls.get());
+                for (auto & tok : autoparser_tokens) {
+                    if (tok.size() >= MIN_TOKEN_LEN) {
+                        chat_params.special_tokens.push_back(std::move(tok));
+                    }
+                }
+
+                // Collect all tokens the tokenizer would recognize as special
+                // (must match the same condition used by tokenizer_st_partition:
+                //  CONTROL | USER_DEFINED | UNKNOWN)
+                const int32_t n_vocab = llama_vocab_n_tokens(vocab);
+                for (int32_t i = 0; i < n_vocab; ++i) {
+                    auto attr = llama_vocab_get_attr(vocab, i);
+                    if (attr & (LLAMA_TOKEN_ATTR_CONTROL | LLAMA_TOKEN_ATTR_USER_DEFINED | LLAMA_TOKEN_ATTR_UNKNOWN)) {
+                        const char * text = llama_vocab_get_text(vocab, i);
+                        if (text && text[0] != '\0') {
+                            std::string tok(text);
+                            if (tok.size() >= MIN_TOKEN_LEN &&
+                                std::find(chat_params.special_tokens.begin(), chat_params.special_tokens.end(), tok) == chat_params.special_tokens.end()) {
+                                chat_params.special_tokens.push_back(std::move(tok));
+                            }
+                        }
+                    }
+                }
+                SRV_INF("discovered %zu special tokens for stripping (min_len=%zu)\n",
+                        chat_params.special_tokens.size(), MIN_TOKEN_LEN);
+                for (size_t i = 0; i < chat_params.special_tokens.size(); ++i) {
+                    SRV_DBG("  special_token[%zu] = '%s'\n", i, chat_params.special_tokens[i].c_str());
+                }
+            }
         }
 
         return true;

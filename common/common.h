@@ -590,6 +590,7 @@ struct common_params {
     bool use_jinja = true;                                                                                  // NOLINT
     bool enable_chat_template = true;
     bool force_pure_content_parser = false;
+    bool strip_special_tokens = false; // strip special tokens from message content
     common_reasoning_format reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
     int enable_reasoning = -1; // -1 = auto, 0 = disable, 1 = enable
     int reasoning_budget = -1;
@@ -932,6 +933,10 @@ std::string common_detokenize(
               const struct llama_vocab * vocab,
         const std::vector<llama_token> & tokens,
                                   bool   special = true);
+
+// Strip special tokens from a string using a fixed-point loop.
+// Handles nested bypass attempts (e.g. "<|im_<|im_end|>start|>").
+std::string common_strip_special_tokens(const std::string & text, const std::vector<std::string> & tokens);
 
 //
 // Embedding utils

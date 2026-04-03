@@ -1005,6 +1005,55 @@ json oaicompat_chat_params_parse(
         }
     }
 
+    // Strip special tokens from all message fields to prevent prompt injection
+    if (opt.strip_special_tokens && !opt.special_tokens.empty()) {
+        const auto & special_tokens = opt.special_tokens;
+
+        // helper: strip from a single JSON string field if present
+        auto strip_field = [&](json & obj, const char * key) {
+            if (!obj.contains(key) || !obj.at(key).is_string()) {
+                return;
+            }
+            std::string text = obj.at(key).get<std::string>();
+            std::string stripped = common_strip_special_tokens(text, special_tokens);
+            if (stripped != text) {
+                SRV_DBG("stripped special tokens from '%s': '%s' -> '%s'\n", key, text.c_str(), stripped.c_str());
+            }
+            obj[key] = std::move(stripped);
+        };
+
+        for (auto & msg : messages) {
+            // strip from content (string or array of {type:"text", text:...})
+            if (msg.contains("content")) {
+                json & content = msg.at("content");
+                if (content.is_string()) {
+                    strip_field(msg, "content");
+                } else if (content.is_array()) {
+                    for (auto & p : content) {
+                        if (json_value(p, "type", std::string()) == "text") {
+                            strip_field(p, "text");
+                        }
+                    }
+                }
+            }
+
+            // strip from other fields that flow into the rendered prompt
+            strip_field(msg, "reasoning_content");
+            strip_field(msg, "name");
+            strip_field(msg, "tool_call_id");
+
+            if (msg.contains("tool_calls") && msg.at("tool_calls").is_array()) {
+                for (auto & tc : msg.at("tool_calls")) {
+                    if (tc.contains("function")) {
+                        auto & fn = tc.at("function");
+                        strip_field(fn, "name");
+                        strip_field(fn, "arguments");
+                    }
+                }
+            }
+        }
+    }
+
     common_chat_templates_inputs inputs;
     inputs.messages              = common_chat_msgs_parse_oaicompat(messages);
     inputs.tools                 = common_chat_tools_parse_oaicompat(tools);

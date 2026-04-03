@@ -1606,6 +1606,31 @@ std::string common_detokenize(const struct llama_vocab * vocab, const std::vecto
     return text;
 }
 
+std::string common_strip_special_tokens(const std::string & text, const std::vector<std::string> & tokens) {
+    if (tokens.empty()) {
+        return text;
+    }
+
+    // Repeat until fixed point: stripping one token may reveal another
+    // (e.g. "<|im_<|im_end|>start|>" -> after removing <|im_end|> becomes "<|im_start|>")
+    std::string result = text;
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const auto & token : tokens) {
+            if (token.empty()) {
+                continue;
+            }
+            size_t pos = 0;
+            while ((pos = result.find(token, pos)) != std::string::npos) {
+                result.erase(pos, token.size());
+                changed = true;
+            }
+        }
+    }
+    return result;
+}
+
 //
 // Embedding utils
 //
